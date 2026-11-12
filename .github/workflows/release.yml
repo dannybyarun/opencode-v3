@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: package the bootstrap
+        run: |
+          mkdir -p opencode-v3/plugin/resources
+          cp plugin/bun-relay.ts opencode-v3/plugin/
+          cp plugin/resources/* opencode-v3/plugin/resources/
+          cp install.sh opencode-v3/ opencode-v3.cmd opencode-v3 README.md opencode-v3/
+          cp bin/warp-rotate.sh bin/tunnel-watchdog.sh opencode-v3/bin/ 2>/dev/null || true
+          tar -czf opencode-v3-bootstrap.tar.gz opencode-v3
+          cd opencode-v3 && zip -qr ../opencode-v3-bootstrap.zip . && cd ..
+          ls -la opencode-v3-bootstrap.*
+
+      - name: publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            opencode-v3-bootstrap.tar.gz
+            opencode-v3-bootstrap.zip
+          generate_release_notes: true
+          body: |
+            ## opencode-v3
+
+            A fully separate opencode instance: its own database, sessions,
+            project, relay (43914), pins and logs — it cannot disconnect an
+            opencode you are already running.
+
+            ```bash
+            # Linux / macOS / WSL / Git Bash
+            curl -fsSL https://github.com/dannybyarun/opencode-v3/releases/latest/download/opencode-v3-bootstrap.tar.gz | tar xz
+            cd opencode-v3 && bash install.sh
+            ~/.local/bin/opencode-v3
+            ```
+
+            ```powershell
+            # Windows
+            curl -fsSL -o opencode-v3-bootstrap.zip https://github.com/dannybyarun/opencode-v3/releases/latest/download/opencode-v3-bootstrap.zip
+            Expand-Archive opencode-v3-bootstrap.zip
+            cd opencode-v3
+            powershell -ExecutionPolicy Bypass -File .\install.ps1
+            ```
+
+            See the README for the platform matrix (the rotatable WARP
+            tunnel needs `usque`; elsewhere the relay uses the native egress).
