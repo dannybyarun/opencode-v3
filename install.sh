@@ -15,13 +15,22 @@ set -u
 REPO_URL=${OPENCODE_V3_REPO_URL:-https://raw.githubusercontent.com/dannybyarun/opencode-v3/main}
 
 # Where does this script live? When it is piped into bash there is no script
-# directory, so the plugin is fetched from the repository instead.
+# directory at all ($0 is just "bash"), so the plugin is fetched from the
+# repository instead. Never fall back to the current directory: that would
+# silently pick up a stray plugin/ folder.
 if [ -n "${BASH_VERSION:-}" ]; then
   SELF="${BASH_SOURCE[0]:-$0}"
 else
   SELF="$0"
 fi
-HERE=$(cd "$(dirname "$SELF")" 2>/dev/null && pwd) || HERE=""
+case "$SELF" in
+  */*) ;;
+  *) SELF="" ;;
+esac
+HERE=""
+if [ -n "$SELF" ]; then
+  HERE=$(cd "$(dirname "$SELF")" 2>/dev/null && pwd) || HERE=""
+fi
 [ -f "$HERE/plugin/bun-relay.ts" ] || HERE=""
 
 ROOT=${OPENCODE_V3_ROOT:-$HOME/.opencode-v3}
