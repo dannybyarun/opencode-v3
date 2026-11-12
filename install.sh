@@ -1,77 +1,211 @@
 #!/usr/bin/env bash
-# install.sh — bootstrap a portable opencode-v3 instance.
+# install.sh - one-click installer for Linux / macOS / WSL / Git Bash.
 #
-#   bash install.sh                 # default root: ~/.opencode-v3
-#   OPENCODE_V3_ROOT=/path bash install.sh
+#   curl -fsSL https://raw.githubusercontent.com/dannybyarun/opencode-v3/main/install.sh | bash
 #
-# Works on Linux, macOS, WSL and Git Bash. The optional WARP tunnel (usque)
-# is only used where the binary exists; everywhere else the v3 relay runs on
-# the device's native egress.
+# or, from a clone:
+#
+#   bash install.sh
+#
+# Creates the instance layout, installs the relay plugin, the launcher and the
+# opencode binary (it downloads one if this machine has none), puts the
+# launcher on PATH and drops a desktop launcher. Nothing to configure by hand.
 set -u
 
-HERE=$(cd "$(dirname "$0")" && pwd)
+REPO_URL=${OPENCODE_V3_REPO_URL:-https://raw.githubusercontent.com/dannybyarun/opencode-v3/main}
+
+# Where does this script live? When it is piped into bash there is no script
+# directory, so the plugin is fetched from the repository instead.
+if [ -n "${BASH_VERSION:-}" ]; then
+  SELF="${BASH_SOURCE[0]:-$0}"
+else
+  SELF="$0"
+fi
+HERE=$(cd "$(dirname "$SELF")" 2>/dev/null && pwd) || HERE=""
+[ -f "$HERE/plugin/bun-relay.ts" ] || HERE=""
+
 ROOT=${OPENCODE_V3_ROOT:-$HOME/.opencode-v3}
 HOME_DIR="$ROOT/home"
 PLUGIN_DIR="$HOME_DIR/.config/opencode/plugin"
+STATE="$ROOT/state"
+BIN_DIR="$ROOT/bin"
+WORK_DIR="$ROOT/work"
 
 say() { printf 'install: %s\n' "$*"; }
+die() { printf 'install: %s\n' "$*" >&2; exit 1; }
 
+mkdir -p "$PLUGIN_DIR/resources" "$STATE" "$WORK_DIR" "$ROOT/mint" "$BIN_DIR" \
+  "$ROOT/tunnel" || die "could not create the layout under $ROOT"
 say "root -> $ROOT"
-mkdir -p "$PLUGIN_DIR/resources" "$ROOT/state" "$ROOT/work" "$ROOT/mint" \
-  "$ROOT/bin" "$ROOT/tunnel" || {
-  say "could not create the layout"
-  exit 1
-}
 
-# --- the relay plugin + resources -------------------------------------------
-if [ -f "$HERE/plugin/bun-relay.ts" ]; then
-  cp "$HERE/plugin/bun-relay.ts" "$PLUGIN_DIR/"
-  cp "$HERE"/plugin/resources/* "$PLUGIN_DIR/resources/" 2>/dev/null || true
+# ------------------------------------------------------------------ plugin
+if [ -n "$HERE" ] && [ -f "$HERE/plugin/bun-relay.ts" ]; then
+  cp -f "$HERE/plugin/bun-relay.ts" "$PLUGIN_DIR/"
+  cp -f "$HERE"/plugin/resources/* "$PLUGIN_DIR/resources/" 2>/dev/null || true
   say "relay plugin installed -> $PLUGIN_DIR"
 else
-  say "plugin/ not found next to install.sh — are you running it from a clone?"
-  exit 1
+  say "relay plugin not found next to the installer - downloading it"
+  command -v curl >/dev/null 2>&1 || die "curl is required to download the relay plugin"
+  curl -fsSL "$REPO_URL/plugin/bun-relay.ts" -o "$PLUGIN_DIR/bun-relay.ts" \
+    || die "could not download the relay plugin"
+  for f in agent-prompt.txt agent-tools.json title-prompt.txt; do
+    curl -fsSL "$REPO_URL/plugin/resources/$f" -o "$PLUGIN_DIR/resources/$f" 2>/dev/null || true
+  done
+  say "relay plugin downloaded -> $PLUGIN_DIR"
 fi
 
-# --- the tunnel plumbing (Linux-ish only) ----------------------------------
-for f in warp-rotate.sh tunnel-watchdog.sh; do
-  if [ -f "$HERE/bin/$f" ]; then
-    cp "$HERE/bin/$f" "$ROOT/bin/"
-    chmod +x "$ROOT/bin/$f" 2>/dev/null || true
+# ---------------------------------------------------------------- launcher
+if [ -n "$HERE" ] && [ -f "$HERE/opencode-v3" ]; then
+  cp -f "$HERE/opencode-v3" "$BIN_DIR/opencode-v3"
+  for f in warp-rotate.sh tunnel-watchdog.sh; do
+    [ -f "$HERE/bin/$f" ] && cp -f "$HERE/bin/$f" "$BIN_DIR/"
+  done
+else
+  curl -fsSL "$REPO_URL/opencode-v3" -o "$BIN_DIR/opencode-v3" \
+    || die "could not download the launcher"
+  for f in warp-rotate.sh tunnel-watchdog.sh; do
+    curl -fsSL "$REPO_URL/bin/$f" -o "$BIN_DIR/$f" 2>/dev/null || true
+  done
+fi
+chmod +x "$BIN_DIR/opencode-v3" 2>/dev/null || true
+chmod +x "$BIN_DIR"/*.sh 2>/dev/null || true
+say "launcher installed -> $BIN_DIR/opencode-v3"
+
+# ---------------------------------------------------------------- opencode
+find_opencode() {
+  if [ "${OPENCODE_V3_FORCE_DOWNLOAD:-}" = "1" ]; then
+    return 1
   fi
-done
-say "tunnel helpers installed -> $ROOT/bin (used only if usque exists)"
+  if [ -n "${OPENCODE_BIN:-}" ] && [ -x "$OPENCODE_BIN" ]; then
+    echo "$OPENCODE_BIN"
+    return 0
+  fi
+  if command -v opencode >/dev/null 2>&1; then
+    command -v opencode
+    return 0
+  fi
+  for c in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode" \
+    "/usr/local/bin/opencode" "/opt/homebrew/bin/opencode"; do
+    [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
 
-# --- the launcher -----------------------------------------------------------
-cp "$HERE/opencode-v3" "$ROOT/bin/opencode-v3"
-chmod +x "$ROOT/bin/opencode-v3" 2>/dev/null || true
-ln -sf "$ROOT/bin/opencode-v3" "$HOME/.local/bin/opencode-v3" 2>/dev/null || true
-say "launcher installed -> $ROOT/bin/opencode-v3"
+# The standalone build is the fallback when this machine has no opencode at
+# all. Pick the binary that matches the libc and the CPU.
+download_opencode() {
+  command -v curl >/dev/null 2>&1 || die "curl is required to download opencode"
+  raw_os=$(uname -s)
+  case "$raw_os" in
+    Darwin*) os=darwin ;;
+    Linux*) os=linux ;;
+    MINGW*|MSYS*|CYGWIN*) os=windows ;;
+    *) os=linux ;;
+  esac
+  arch=$(uname -m)
+  case "$arch" in
+    aarch64|arm64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+  esac
+  base="https://opencode.ai/update/api/latest/cli/opencode/opencode-$os-$arch"
+  suffix=".tar.gz"
+  [ "$os" = windows ] && suffix=".zip"
 
-# --- opencode itself --------------------------------------------------------
-if command -v opencode >/dev/null 2>&1; then
-  say "opencode found: $(command -v opencode)"
+  candidates="$base$suffix"
+  if [ "$os" = linux ]; then
+    musl=""
+    if [ -f /etc/alpine-release ] || (ldd --version 2>&1 | grep -qi musl); then
+      musl="-musl"
+    fi
+    base_alt=""
+    if [ "$arch" = x64 ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+      base_alt="-baseline"
+    fi
+    candidates="$base$base_alt$musl$suffix $base$musl$suffix $base$base_alt$suffix $base$suffix"
+  fi
+
+  tmp=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/opencode-v3-install.$$")
+  mkdir -p "$tmp"
+  for url in $candidates; do
+    say "no opencode on this machine - downloading the standalone binary"
+    say "  $url"
+    if ! curl -fsSL "$url" -o "$tmp/opencode-bin"; then
+      continue
+    fi
+    if [ "$suffix" = ".zip" ]; then
+      command -v unzip >/dev/null 2>&1 || die "unzip is required on Windows-like systems"
+      unzip -oq "$tmp/opencode-bin" -d "$BIN_DIR" || die "could not unpack $url"
+      binpath="$BIN_DIR/opencode.exe"
+    else
+      tar -xzf "$tmp/opencode-bin" -C "$tmp" || continue
+      mv -f "$tmp/opencode" "$BIN_DIR/opencode" || continue
+      binpath="$BIN_DIR/opencode"
+    fi
+    chmod +x "$binpath" 2>/dev/null || true
+    rm -rf "$tmp"
+    echo "$binpath"
+    return 0
+  done
+  rm -rf "$tmp"
+  return 1
+}
+
+if bin=$(find_opencode); then
+  say "opencode found: $bin"
+elif [ "${OPENCODE_V3_NO_DOWNLOAD:-}" = "1" ]; then
+  die "opencode NOT found and OPENCODE_V3_NO_DOWNLOAD=1 - install it from https://opencode.ai"
 else
-  say "opencode NOT found — install it first (https://opencode.ai) or set OPENCODE_BIN"
+  bin=$(download_opencode) || die "could not download opencode - install it from https://opencode.ai and re-run"
+  say "opencode installed -> $bin"
 fi
 
-# --- the optional tunnel ----------------------------------------------------
-if command -v usque >/dev/null 2>&1; then
-  say "usque found: $(command -v usque) — the v3 will use its own WARP tunnel"
-else
-  say "no usque — the v3 relay will use this device's native egress (fine:"
-  say "  it is still a fully separate instance; it just has no rotatable"
-  say "  second bucket)"
-fi
+# Pin the exact binary so the v3 always starts the same one, whatever shell
+# launched it.
+printf '%s\n' "$bin" > "$STATE/opencode-bin.txt"
+say "opencode binary pinned -> $STATE/opencode-bin.txt"
 
-cat <<EOF
+# ------------------------------------------------------------------ PATH
+mkdir -p "$HOME/.local/bin"
+ln -sf "$BIN_DIR/opencode-v3" "$HOME/.local/bin/opencode-v3" 2>/dev/null || true
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *)
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+      [ -f "$rc" ] || continue
+      grep -q '.local/bin' "$rc" 2>/dev/null || {
+        printf '\n# opencode-v3\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+        say "added $HOME/.local/bin to $rc"
+      }
+      break
+    done
+    ;;
+esac
+say "launcher on PATH -> $HOME/.local/bin/opencode-v3"
 
-$(say "done")
-
-  $ROOT/bin/opencode-v3            # interactive
-  $ROOT/bin/opencode-v3 run "hi"   # headless
-  $ROOT/bin/opencode-v3 status     # what is running
-
-  The v3 has its own HOME, database, sessions, project, relay (43914), pins
-  and logs. It cannot affect any opencode you are already running.
+# ------------------------------------------------------------------ desktop
+if [ -d "$HOME/Desktop" ]; then
+  cat > "$HOME/Desktop/opencode-v3.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=opencode-v3
+Comment=A fully separate opencode instance
+Exec=$BIN_DIR/opencode-v3
+Terminal=true
+Categories=Development;
 EOF
+  chmod +x "$HOME/Desktop/opencode-v3.desktop" 2>/dev/null || true
+  say "desktop launcher created -> $HOME/Desktop/opencode-v3.desktop"
+fi
+
+# ------------------------------------------------------------------ done
+printf '\n'
+say "done"
+printf '\n'
+printf '  opencode-v3             # interactive\n'
+printf '  opencode-v3 run "hi"    # headless\n'
+printf '  opencode-v3 status      # what is running\n'
+printf '\n'
+printf '  Open a NEW terminal so the PATH change takes effect. The v3 has its\n'
+printf '  own HOME, database, sessions, project, relay (43914), pins and logs -\n'
+printf '  it cannot affect any opencode you are already running.\n'
+printf '\n'

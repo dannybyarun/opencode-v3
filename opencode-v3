@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# opencode-v3 — launch a COMPLETELY SEPARATE opencode instance.
+# opencode-v3 - launch a COMPLETELY SEPARATE opencode instance.
 #
 # It is independent of any opencode you are already running:
 #   * its own HOME        -> its own opencode.db, sessions, config, plugins
@@ -8,7 +8,7 @@
 #   * its own tunnel      -> optional: a usque/WARP proxy on 127.0.0.1:40003
 #                           with its own identity. Where usque does not exist
 #                           (Windows, macOS) the relay simply uses the device's
-#                           native egress — still a separate instance.
+#                           native egress - still a separate instance.
 #   * its own rotator / watchdog / rescue log / pins / mint dir
 #
 # Nothing it does can touch an opencode you are already talking to: different
@@ -30,6 +30,14 @@ TUNNEL_DIR="$ROOT/tunnel"
 RELAY_PORT=${OPENCODE_V3_RELAY_PORT:-43914}
 TUNNEL_PORT=${OPENCODE_V3_TUNNEL_PORT:-40003}
 PLUGIN_DIR="$HOME_DIR/.config/opencode/plugin"
+# The installer pins the exact opencode binary it found (or downloaded) so
+# the v3 always starts the same one, whatever shell launched it. The pin is
+# only used when it really is executable, so a Windows path written by the
+# Windows installer can never break this launcher.
+if [ -z "${OPENCODE_BIN:-}" ] && [ -f "$STATE/opencode-bin.txt" ]; then
+  _pinned=$(head -n 1 "$STATE/opencode-bin.txt" 2>/dev/null || true)
+  [ -n "$_pinned" ] && [ -x "$_pinned" ] && OPENCODE_BIN="$_pinned"
+fi
 OPENCODE_BIN=${OPENCODE_BIN:-opencode}
 RESOURCES_DIR="$ROOT/resources"
 
@@ -87,7 +95,7 @@ use_tunnel() {
 
 use_native() {
   # No tunnel (or none available): the v3 relay talks to the gateway through
-  # the device's native egress, with NO proxy of its own — so it never shares
+  # the device's native egress, with NO proxy of its own - so it never shares
   # a bucket with an opencode that is proxying somewhere else.
   unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy
   unset OPENCODE_RELAY_PROXY WARP_PROXY_PORT
@@ -128,7 +136,8 @@ status() {
   echo "v3 tunnel   : $(curl -s -m 8 -x "http://127.0.0.1:$TUNNEL_PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp)=' | tr '\n' ' ' || echo 'none (native egress)')"
   echo "v3 db       : $HOME_DIR/.local/share/opencode/opencode.db"
   echo "v3 project  : $WORK"
-  echo "usque       : $(have_usque && echo available || echo 'not installed — native egress only')"
+  echo "v3 opencode : $OPENCODE_BIN"
+  echo "usque       : $(have_usque && echo available || echo 'not installed - native egress only')"
   echo "live relay  : $(curl -s -m 5 http://127.0.0.1:43904/relay-health 2>/dev/null || echo 'not running')"
 }
 

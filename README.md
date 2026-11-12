@@ -1,59 +1,86 @@
-# opencode-v3 — a second, fully separate opencode instance
+# opencode-v3 - a second, fully separate opencode instance
 
 Run **another opencode** alongside the one you are already using: its own
 database, its own sessions, its own project, its own relay, its own tunnel.
-Anything you do in it — rotate the egress, kill the tunnel, drain the quota,
-break the plugin — cannot disconnect the opencode you are talking to.
+Anything you do in it - rotate the egress, kill the tunnel, drain the quota,
+break the plugin - cannot disconnect the opencode you are talking to.
 
 It is also the **resilient** one: the v3's opencode talks to the gateway
 through the v3 relay, so it inherits everything the relay knows how to do:
 
 - the gateway whitelist (the relay rewrites the body into the approved
-  "agent class" — the free models only accept that shape),
+  "agent class" - the free models only accept that shape),
 - the free-model **pool rotation** (ten free models, the relay rotates when
   one is drained),
 - the **egress ladder** (proxied path first, then the device's native
-  egress — a dead proxy no longer kills the request),
+  egress - a dead proxy no longer kills the request),
 - the **spin budget** (a request is never parked for minutes),
 - the **rescue chain** (rotate the egress and refresh the credential in the
   background).
 
 ## Install
 
-### Linux / macOS / WSL / Git Bash
+### Windows - one click
+
+Download this repo and **double-click `install.cmd`**.
+
+That is the whole install. It creates the instance, wires the launcher into
+your PATH, drops a shortcut on your desktop and opens the v3. No
+administrator rights, nothing to type, nothing to configure.
+
+If you prefer a terminal:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+### Linux / macOS - one command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dannybyarun/opencode-v3/main/install.sh | bash
+```
+
+Or from a clone:
 
 ```bash
 git clone https://github.com/dannybyarun/opencode-v3.git
 cd opencode-v3
 bash install.sh
-~/.local/bin/opencode-v3            # interactive
-~/.local/bin/opencode-v3 run "hi"   # headless
-~/.local/bin/opencode-v3 status     # what is running
 ```
 
-### Windows (PowerShell)
+### What the installer does for you
 
-```powershell
-git clone https://github.com/dannybyarun/opencode-v3.git
-cd opencode-v3
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-$env:USERPROFILE\.opencode-v3\bin\opencode-v3.cmd
+| step | detail |
+|---|---|
+| instance layout | `~/.opencode-v3` (`%USERPROFILE%\.opencode-v3`): own HOME, DB, sessions, project, relay port, pins, logs |
+| relay plugin | installed from the clone, or downloaded from the repo when you use the one-liner |
+| launcher | `opencode-v3` on your PATH, plus a desktop shortcut (Windows) or launcher (Linux) |
+| opencode | your existing binary is used and pinned; if the machine has none, the standalone build is downloaded into the instance |
+| tunnel | `usque`/WARP is used where it exists, otherwise the native egress |
+
+Nothing is overwritten in your existing opencode: the v3 keeps its own HOME,
+its own database and its own ports.
+
+Then:
+
+```bash
+opencode-v3              # interactive
+opencode-v3 run "hi"     # headless
+opencode-v3 status       # what is running
 ```
-
-Requires [opencode](https://opencode.ai) to be installed and on `PATH`.
 
 ## Platform matrix
 
 | | Linux / macOS / WSL | Windows |
 |---|---|---|
-| separate HOME, DB, sessions, project | ✅ | ✅ |
-| own relay (port 43914) with pool/ladder/budget/rescue | ✅ | ✅ |
-| own **rotatable** WARP tunnel (usque) | ✅ (if `usque` is present) | ❌ → native egress |
-| egress recovery by rotating the IP | ✅ | native egress only (a second bucket can be added by pointing `OPENCODE_RELAY_PROXY` at any local HTTP proxy) |
-| the live opencode is unaffected | ✅ | ✅ |
+| separate HOME, DB, sessions, project | yes | yes |
+| own relay (port 43914) with pool/ladder/budget/rescue | yes | yes |
+| own **rotatable** WARP tunnel (usque) | yes (if `usque` is present) | no - native egress |
+| egress recovery by rotating the IP | yes | native egress only (a second bucket can be added by pointing `OPENCODE_RELAY_PROXY` at any local HTTP proxy) |
+| the live opencode is unaffected | yes | yes |
 
 Where `usque` is not available the v3 relay simply uses the machine's native
-egress — still a completely separate instance, it just has no *rotatable*
+egress - still a completely separate instance, it just has no *rotatable*
 second bucket. To give it one, point it at any local HTTP proxy:
 
 ```bash
@@ -64,7 +91,7 @@ OPENCODE_V3_TUNNEL_PORT=8080 OPENCODE_RELAY_PROXY=http://127.0.0.1:8080 opencode
 
 ```
 <root>/                     default ~/.opencode-v3   (%USERPROFILE%\.opencode-v3)
-  home/                     HOME for the v3 opencode — own DB, config, plugins
+  home/                     HOME for the v3 opencode - own DB, config, plugins
   work/                     the v3 project directory (yours to use)
   state/                    logs, reports, pid files, the runtime override files
   mint/                     the v3's scratch dir for identity rotation
@@ -84,6 +111,8 @@ file.
 | `OPENCODE_V3_RELAY_PORT` | the v3 relay's port (default 43914) |
 | `OPENCODE_V3_TUNNEL_PORT` | the v3 tunnel's proxy port (default 40003) |
 | `OPENCODE_BIN` | the opencode binary to run (default `opencode`) |
+| `OPENCODE_V3_NO_DOWNLOAD` | `1` = never download opencode, fail instead |
+| `OPENCODE_V3_FORCE_DOWNLOAD` | `1` = ignore the installed opencode, fetch a private one into the instance |
 | `OPENCODE_RELAY_SPIN_BUDGET_MS` | how long a request may spin before the relay answers with the last error (default 45000) |
 | `OPENCODE_RELAY_AUTOMINT=0` | disable the automatic identity rotation |
 | `OPENCODE_RELAY_EGRESS_ROTATE=0` | the rescue chain refreshes the credential but does not touch the egress |
@@ -94,12 +123,13 @@ Live-reloadable files (no restart needed):
 |---|---|
 | `<root>/state/direct-egress` | the relay bypasses its proxy and uses the native egress |
 | `<root>/state/relay-upstream.txt` | point the relay at a different upstream |
+| `<root>/state/opencode-bin.txt` | the exact opencode binary the v3 starts |
 | `<root>/state/rescue.log` | the rescue chain's transcript |
 | `<root>/state/relay-activity.log` | the relay's activity log |
 
 ## What the v3's opencode is allowed to do
 
-Everything the live one can — it is the same binary with a different HOME. It
+Everything the live one can - it is the same binary with a different HOME. It
 gets its own sessions, its own history, its own project directory, and it can
 be pointed at any OpenAI-compatible endpoint:
 
