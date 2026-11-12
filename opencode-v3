@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# opencode-v3 — launch a COMPLETELY SEPARATE opencode instance.
+#
+# It is independent of any opencode you are already running:
+#   * its own HOME        -> its own opencode.db, sessions, config, plugins
+#   * its own project dir -> <root>/work
+#   * its own relay       -> 127.0.0.1:43914 (by default; the live one is 43904)
+#   * its own tunnel      -> optional: a usque/WARP proxy on 127.0.0.1:40003
+#                           with its own identity. Where usque does not exist
+#                           (Windows, macOS) the relay simply uses the device's
+#                           native egress — still a separate instance.
+#   * its own rotator / watchdog / rescue log / pins / mint dir
+#
+# Nothing it does can touch an opencode you are already talking to: different
+# ports, different HOME, different state directory.
+#
+# Usage:
+#   opencode-v3                # interactive TUI in the v3 project
+#   opencode-v3 run "hello"    # headless, one prompt
+#   opencode-v3 status         # what is running
+#   opencode-v3 shell          # a shell with the v3 environment exported
+#   opencode-v3 direct         # talk to the gateway directly (no relay)
+set -u
+
+ROOT=${OPENCODE_V3_ROOT:-$HOME/.opencode-v3}
+HOME_DIR="$ROOT/home"
+STATE="$ROOT/state"
+WORK="$ROOT/work"
+TUNNEL_DIR="$ROOT/tunnel"
+RELAY_PORT=${OPENCODE_V3_RELAY_PORT:-43914}
+TUNNEL_PORT=${OPENCODE_V3_TUNNEL_PORT:-40003}
+PLUGIN_DIR="$HOME_DIR/.config/opencode/plugin"
+OPENCODE_BIN=${OPENCODE_BIN:-opencode}
+RESOURCES_DIR="$ROOT/resources"
+
+mkdir -p "$HOME_DIR/.config/opencode" "$PLUGIN_DIR/resources" "$STATE" "$WORK" \
+  "$TUNNEL_DIR" "$ROOT/mint" "$ROOT/bin" 2>/dev/null || true
+
+# ---------------------------------------------------------------- environment
+export HOME="$HOME_DIR"
+export USERPROFILE="$HOME_DIR" 2>/dev/null || true   # Bun on Windows
+export OPENCODE_RELAY_PORT="$RELAY_PORT"
+export OPENCODE_RELAY_DIR="$PLUGIN_DIR"
+export OPENCODE_RELAY_MINT_DIR="$ROOT/mint"
+export OPENCODE_RELAY_ACTIVITY_LOG="$STATE/relay-activity.log"
+export OPENCODE_RELAY_UPSTREAM_FILE="$STATE/relay-upstream.txt"
+export OPENCODE_RELAY_DIRECT_EGRESS_FLAG="$STATE/direct-egress"
+export OPENCODE_RELAY_RESCUE_LOG="$STATE/rescue.log"
+export OPENCODE_RELAY_ROTATOR="$ROOT/bin/warp-rotate.sh"
+export OPENCODE_RELAY_WATCHDOG="$ROOT/bin/tunnel-watchdog.sh"
+export OPENCODE_ROTATE_MARKER="$STATE/.rotate.inprogress"
+
+tunnel_up() {
+  curl -s -m 8 -x "http://127.0.0.1:$TUNNEL_PORT" \
+    https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q '^warp=on'
+}
+
+have_usque() { command -v usque >/dev/null 2>&1; }
+
+start_tunnel() {
+  have_usque || return 1
+  local conf="$TUNNEL_DIR/config.json"
+  if [ ! -f "$conf" ]; then
+    (cd "$TUNNEL_DIR" && env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+      usque register -a -c "$conf" -n "opencode-v3-$(date +%s)") >>"$STATE/register.log" 2>&1
+  fi
+  (cd "$TUNNEL_DIR" && env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+    setsid nohup usque -c "$conf" http-proxy -b 127.0.0.1 -p "$TUNNEL_PORT" \
+    >>"$STATE/usque.log" 2>&1 & echo $! >"$STATE/usque.pid")
+  for _ in $(seq 1 30); do
+    sleep 1
+    tunnel_up && return 0
+  done
+  return 1
+}
+
+use_tunnel() {
+  tunnel_up || start_tunnel || return 1
+  export WARP_PROXY_PORT="$TUNNEL_PORT"
+  export HTTPS_PROXY="http://127.0.0.1:$TUNNEL_PORT"
+  export HTTP_PROXY="http://127.0.0.1:$TUNNEL_PORT"
+  export OPENCODE_RELAY_PROXY="http://127.0.0.1:$TUNNEL_PORT"
+  export NO_PROXY="127.0.0.1,localhost,::1"
+  export no_proxy="127.0.0.1,localhost,::1"
+  return 0
+}
+
+use_native() {
+  # No tunnel (or none available): the v3 relay talks to the gateway through
+  # the device's native egress, with NO proxy of its own — so it never shares
+  # a bucket with an opencode that is proxying somewhere else.
+  unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy
+  unset OPENCODE_RELAY_PROXY WARP_PROXY_PORT
+  export NO_PROXY="127.0.0.1,localhost,::1"
+  export no_proxy="127.0.0.1,localhost,::1"
+}
+
+# Point the v3's opencode at the v3 RELAY. Then the opencode client inherits
+# everything the relay knows how to do: the gateway whitelist (the relay
+# rewrites the body into the approved agent class), the free-model pool
+# rotation, the egress ladder (proxy -> native), the spin budget (no
+# multi-minute hangs) and the rescue chain. Without this the opencode client
+# talks to the gateway directly and has NONE of that: one dead proxy and it
+# fails with the gateway's own error.
+use_relay() {
+  mkdir -p "$HOME_DIR/.config/opencode" 2>/dev/null || true
+  cat >"$HOME_DIR/.config/opencode/opencode.json" <<EOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "opencode": {
+      "options": {
+        "baseURL": "http://127.0.0.1:$RELAY_PORT/openai/v1"
+      }
+    }
+  }
+}
+EOF
+}
+
+use_direct() {
+  rm -f "$HOME_DIR/.config/opencode/opencode.json" 2>/dev/null || true
+}
+
+status() {
+  echo "root        : $ROOT"
+  echo "v3 relay    : $(curl -s -m 5 "http://127.0.0.1:$RELAY_PORT/relay-health" 2>/dev/null || echo DOWN)"
+  echo "v3 tunnel   : $(curl -s -m 8 -x "http://127.0.0.1:$TUNNEL_PORT" https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -E '^(ip|warp)=' | tr '\n' ' ' || echo 'none (native egress)')"
+  echo "v3 db       : $HOME_DIR/.local/share/opencode/opencode.db"
+  echo "v3 project  : $WORK"
+  echo "usque       : $(have_usque && echo available || echo 'not installed — native egress only')"
+  echo "live relay  : $(curl -s -m 5 http://127.0.0.1:43904/relay-health 2>/dev/null || echo 'not running')"
+}
+
+case "${1:-tui}" in
+  status) status ;;
+  shell)
+    use_relay
+    use_tunnel || use_native
+    cd "$WORK" && exec "${SHELL:-bash}"
+    ;;
+  serve)
+    use_relay
+    use_tunnel || use_native
+    cd "$WORK" && exec "$OPENCODE_BIN" serve --stdio
+    ;;
+  run)
+    use_relay
+    use_tunnel || use_native
+    shift
+    # --standalone: without it the CLI attaches to an ALREADY RUNNING
+    # background service, so the session lands in THAT instance's DB and the
+    # traffic rides THAT instance's proxy. This is what makes v3 separate.
+    cd "$WORK" && exec "$OPENCODE_BIN" run --standalone "$@"
+    ;;
+  tui|"")
+    use_relay
+    use_tunnel || use_native
+    cd "$WORK" && exec "$OPENCODE_BIN" --standalone
+    ;;
+  direct)
+    # Opt out of the relay: the opencode client talks to the gateway directly
+    # (no ladder, no pool, no budget, no rescue).
+    use_direct
+    use_tunnel || use_native
+    shift
+    cd "$WORK" && exec "$OPENCODE_BIN" --standalone "$@"
+    ;;
+  *)
+    use_relay
+    use_tunnel || use_native
+    cd "$WORK" && exec "$OPENCODE_BIN" --standalone "$@"
+    ;;
+esac
